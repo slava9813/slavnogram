@@ -41,3 +41,8 @@ export function dataFilePath() {
   const dbPath = env("DB_PATH", "./data/slavnogram.sqlite");
   return path.isAbsolute(dbPath) ? dbPath : path.resolve(projectRoot(), dbPath);
 }
+
+export function uploadsRoot() {
+  const uploadsPath = env("UPLOADS_DIR", "./apps/api/uploads");
+  return path.isAbsolute(uploadsPath) ? uploadsPath : path.resolve(projectRoot(), uploadsPath);
+}

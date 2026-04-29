@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Post, Req, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "./auth.guard";
 import { AuthService } from "./auth.service";
+import { ChatGateway } from "./chat.gateway";
 import { PostsController } from "./posts.controller";
 import { SqliteService } from "./sqlite.service";
 import { RequestWithUser } from "./types";
@@ -11,6 +12,7 @@ export class CommunitiesController {
     @Inject(SqliteService) private readonly sqlite: SqliteService,
     @Inject(AuthService) private readonly auth: AuthService,
     @Inject(PostsController) private readonly posts: PostsController,
+    @Inject(ChatGateway) private readonly gateway: ChatGateway,
   ) {}
 
   @Get()
@@ -47,6 +49,14 @@ export class CommunitiesController {
     return this.shape(row, req.user.id);
   }
 
+  @Get(":id")
+  get(@Req() req: any, @Param("id") id: string) {
+    const viewer = this.auth.optionalFromHeader(req.headers?.authorization);
+    const row = this.communityRow(Number(id));
+    if (!row) throw new NotFoundException("Community not found");
+    return this.shape(row, viewer?.id);
+  }
+
   @Post(":id/subscribe")
   @UseGuards(JwtAuthGuard)
   subscribe(@Req() req: RequestWithUser, @Param("id") id: string) {
@@ -59,6 +69,15 @@ export class CommunitiesController {
       this.sqlite.database.prepare("DELETE FROM community_members WHERE communityId = ? AND userId = ?").run(communityId, req.user.id);
     } else {
       this.sqlite.database.prepare("INSERT INTO community_members (communityId, userId, createdAt) VALUES (?, ?, ?)").run(communityId, req.user.id, new Date().toISOString());
+      this.gateway.createNotification({
+        userId: Number(row.ownerId),
+        type: "community_subscribe",
+        title: "New subscriber",
+        body: `Someone subscribed to ${row.name}`,
+        actorId: req.user.id,
+        targetType: "community",
+        targetId: communityId,
+      });
     }
 
     return this.shape(this.communityRow(communityId), req.user.id);

@@ -1,9 +1,22 @@
-import { Body, BadRequestException, Controller, Get, Inject, NotFoundException, Param, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, BadRequestException, Controller, Get, Inject, NotFoundException, Param, Post, Req, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { diskStorage } from "multer";
+import fs from "node:fs";
+import path from "node:path";
 import { JwtAuthGuard } from "./auth.guard";
 import { AuthService } from "./auth.service";
 import { ChatGateway } from "./chat.gateway";
+import { uploadsRoot } from "./config";
 import { SqliteService } from "./sqlite.service";
 import { RequestWithUser } from "./types";
+
+const chatUploadsDir = path.join(uploadsRoot(), "chat");
+fs.mkdirSync(chatUploadsDir, { recursive: true });
+
+function chatFilename(_req: unknown, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) {
+  const ext = path.extname(file.originalname).toLowerCase() || ".bin";
+  cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+}
 
 @Controller("chat")
 @UseGuards(JwtAuthGuard)
@@ -52,6 +65,23 @@ export class ChatController {
     const group = this.shapeGroup(this.sqlite.database.prepare("SELECT * FROM chat_groups WHERE id = ?").get(groupId) as any);
     this.gateway.emitGroupUpdated(group);
     return group;
+  }
+
+  @Post("upload")
+  @UseInterceptors(
+    FileInterceptor("file", {
+      storage: diskStorage({ destination: chatUploadsDir, filename: chatFilename }),
+      limits: { fileSize: 24 * 1024 * 1024 },
+    }),
+  )
+  upload(@UploadedFile() file?: Express.Multer.File) {
+    if (!file) throw new BadRequestException("File is required");
+    return {
+      url: `/uploads/chat/${file.filename}`,
+      name: file.originalname,
+      type: file.mimetype,
+      size: file.size,
+    };
   }
 
   @Get("groups/:groupId/history")

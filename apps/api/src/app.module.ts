@@ -1,4 +1,5 @@
 import { Module, forwardRef } from "@nestjs/common";
+import { AdminController } from "./admin.controller";
 import { AppController } from "./app.controller";
 import { AuthController } from "./auth.controller";
 import { AuthService } from "./auth.service";
@@ -7,13 +8,14 @@ import { ChatGateway } from "./chat.gateway";
 import { CommunitiesController } from "./communities.controller";
 import { FriendsController } from "./friends.controller";
 import { JwtAuthGuard } from "./auth.guard";
+import { NotificationsController } from "./notifications.controller";
 import { PostsController } from "./posts.controller";
 import { PresenceService } from "./presence.service";
 import { SqliteService } from "./sqlite.service";
 import { UsersController } from "./users.controller";
 
 @Module({
-  controllers: [AppController, AuthController, UsersController, PostsController, FriendsController, ChatController, CommunitiesController],
+  controllers: [AppController, AuthController, UsersController, PostsController, FriendsController, ChatController, CommunitiesController, NotificationsController, AdminController],
   providers: [SqliteService, AuthService, JwtAuthGuard, PresenceService, ChatGateway, PostsController],
 })
 export class AppModule {}

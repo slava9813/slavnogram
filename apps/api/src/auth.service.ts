@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { env } from "./config";
 import { SqliteService } from "./sqlite.service";
-import { parseJson, AvatarConfig } from "./types";
+import { parseJson, AvatarConfig, isAdminUsername } from "./types";
 
 export type PublicUser = {
   id: number;
@@ -15,6 +15,9 @@ export type PublicUser = {
   bio: string;
   pageConfig: Record<string, unknown>;
   settings?: Record<string, unknown>;
+  role?: string;
+  blocked?: boolean;
+  isAdmin?: boolean;
   createdAt: string;
 };
 
@@ -65,6 +68,9 @@ export class AuthService {
       avatarLocked: Boolean(row.avatarLocked ?? 1),
       bio: row.bio ?? "",
       pageConfig: parseJson<Record<string, unknown>>(row.pageConfig, {}),
+      role: row.role ?? (isAdminUsername(row.username) ? "admin" : "user"),
+      blocked: Boolean(row.blocked ?? 0),
+      isAdmin: isAdminUsername(row.username) || row.role === "admin",
       createdAt: row.createdAt,
     };
   }

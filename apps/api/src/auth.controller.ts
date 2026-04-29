@@ -3,7 +3,7 @@ import { AuthService } from "./auth.service";
 import { JwtAuthGuard } from "./auth.guard";
 import { SqliteService } from "./sqlite.service";
 import { RequestWithUser } from "./types";
-import { isAvatarDataUrl } from "./types";
+import { isAvatarDataUrl, isAdminUsername } from "./types";
 
 @Controller("auth")
 export class AuthController {
@@ -37,8 +37,8 @@ export class AuthController {
 
     const now = new Date().toISOString();
     const result = this.sqlite.database
-      .prepare("INSERT INTO users (username, displayName, passwordHash, avatarConfig, avatarImage, avatarLocked, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(username, displayName, this.auth.hashPassword(password), "{}", avatarImage, 1, now);
+      .prepare("INSERT INTO users (username, displayName, passwordHash, avatarConfig, avatarImage, avatarLocked, role, settings, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(username, displayName, this.auth.hashPassword(password), "{}", avatarImage, 1, isAdminUsername(username) ? "admin" : "user", JSON.stringify({ topics: [] }), now);
 
     const user = this.auth.findUserById(Number(result.lastInsertRowid));
     return { token: this.auth.sign({ id: user!.id, username: user!.username }), user };
@@ -51,6 +51,7 @@ export class AuthController {
     if (!row || !this.auth.comparePassword(body.password ?? "", row.passwordHash)) {
       throw new UnauthorizedException("Wrong username or password");
     }
+    if (row.blocked) throw new UnauthorizedException("Account is blocked");
 
     const user = this.auth.publicUser(row);
     return { token: this.auth.sign(user), user };

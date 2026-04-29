@@ -18,6 +18,12 @@ export type User = {
   pageConfig?: Record<string, unknown>;
   settings?: Record<string, unknown>;
   online?: boolean;
+  friendStatus?: "none" | "friend" | "incoming" | "outgoing";
+  role?: string;
+  blocked?: boolean;
+  blockedByMe?: boolean;
+  blockedMe?: boolean;
+  isAdmin?: boolean;
   createdAt: string;
 };
 
@@ -32,6 +38,9 @@ export type Post = {
   id: number;
   text: string;
   photoUrl?: string | null;
+  mediaUrl?: string | null;
+  mediaType?: "text" | "image" | "video";
+  tags?: string[];
   communityId?: number | null;
   communityName?: string | null;
   createdAt: string;
@@ -78,6 +87,23 @@ export type GroupMessage = {
   sender: User;
 };
 
+export type AppNotification = {
+  id: number;
+  type: "like" | "comment" | "friend_request" | "friend_accept" | "message" | "community_subscribe" | string;
+  title: string;
+  body: string;
+  targetType?: string | null;
+  targetId?: number | null;
+  readAt?: string | null;
+  createdAt: string;
+  actor?: User | null;
+};
+
+export type AdminUser = User & {
+  postsCount: number;
+  friendsCount: number;
+};
+
 export function apiBase() {
   const configured = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000").replace(/\/$/, "");
   if (typeof window === "undefined") return configured;
@@ -113,9 +139,14 @@ export async function request<T>(path: string, options: RequestInit = {}, token?
   });
 
   const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
+  let data: any = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
   if (!response.ok) {
-    throw new Error(data?.message || "Request failed");
+    throw new Error((typeof data === "object" && data?.message) || String(data || "Request failed"));
   }
   return data as T;
 }

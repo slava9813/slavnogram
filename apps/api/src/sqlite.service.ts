@@ -34,6 +34,8 @@ export class SqliteService implements OnModuleInit {
         bio TEXT NOT NULL DEFAULT '',
         pageConfig TEXT NOT NULL DEFAULT '{}',
         settings TEXT NOT NULL DEFAULT '{}',
+        role TEXT NOT NULL DEFAULT 'user',
+        blocked INTEGER NOT NULL DEFAULT 0,
         createdAt TEXT NOT NULL
       );
 
@@ -43,6 +45,10 @@ export class SqliteService implements OnModuleInit {
         communityId INTEGER,
         text TEXT NOT NULL,
         photoUrl TEXT,
+        mediaUrl TEXT,
+        mediaType TEXT NOT NULL DEFAULT 'image',
+        tags TEXT NOT NULL DEFAULT '[]',
+        updatedAt TEXT,
         createdAt TEXT NOT NULL,
         FOREIGN KEY(authorId) REFERENCES users(id) ON DELETE CASCADE,
         FOREIGN KEY(communityId) REFERENCES communities(id) ON DELETE CASCADE
@@ -72,10 +78,12 @@ export class SqliteService implements OnModuleInit {
         userId INTEGER NOT NULL,
         friendId INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'accepted',
+        requesterId INTEGER,
         createdAt TEXT NOT NULL,
         UNIQUE(userId, friendId),
         FOREIGN KEY(userId) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY(friendId) REFERENCES users(id) ON DELETE CASCADE
+        FOREIGN KEY(friendId) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY(requesterId) REFERENCES users(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS messages (
@@ -152,12 +160,43 @@ export class SqliteService implements OnModuleInit {
         createdAt TEXT NOT NULL,
         FOREIGN KEY(userId) REFERENCES users(id) ON DELETE SET NULL
       );
+
+      CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        userId INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        actorId INTEGER,
+        targetType TEXT,
+        targetId INTEGER,
+        readAt TEXT,
+        createdAt TEXT NOT NULL,
+        FOREIGN KEY(userId) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY(actorId) REFERENCES users(id) ON DELETE SET NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS user_blocks (
+        blockerId INTEGER NOT NULL,
+        blockedId INTEGER NOT NULL,
+        createdAt TEXT NOT NULL,
+        PRIMARY KEY(blockerId, blockedId),
+        FOREIGN KEY(blockerId) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY(blockedId) REFERENCES users(id) ON DELETE CASCADE
+      );
     `);
     this.ensureColumn("users", "avatarImage", "TEXT");
     this.ensureColumn("users", "avatarLocked", "INTEGER NOT NULL DEFAULT 1");
     this.ensureColumn("users", "bio", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("users", "pageConfig", "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn("users", "settings", "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn("users", "role", "TEXT NOT NULL DEFAULT 'user'");
+    this.ensureColumn("users", "blocked", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("posts", "mediaUrl", "TEXT");
+    this.ensureColumn("posts", "mediaType", "TEXT NOT NULL DEFAULT 'image'");
+    this.ensureColumn("posts", "tags", "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn("posts", "updatedAt", "TEXT");
+    this.ensureColumn("friends", "requesterId", "INTEGER");
   }
 
   private ensureColumn(table: string, column: string, definition: string) {

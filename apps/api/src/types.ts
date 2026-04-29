@@ -17,6 +17,18 @@ export function moderateContent(value: string) {
   return hit ? `Auto moderation blocked forbidden fragment "${hit}"` : null;
 }
 
+export function extractHashtags(value: string) {
+  const tags = new Set<string>();
+  for (const match of value.matchAll(/#([\p{L}\p{N}_]{2,32})/gu)) {
+    tags.add(match[1].toLowerCase());
+  }
+  return [...tags].slice(0, 12);
+}
+
+export function isAdminUsername(username?: string | null) {
+  return username === "slavnyj_paren";
+}
+
 export type AuthUser = {
   id: number;
   username: string;

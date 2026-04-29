@@ -63,6 +63,15 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const row = this.sqlite.database.prepare("SELECT * FROM messages WHERE id = ?").get(Number(result.lastInsertRowid)) as any;
     const message = this.shapeMessage(row);
     this.emitMessage(message);
+    this.createNotification({
+      userId: recipientId,
+      type: "message",
+      title: `${message.sender?.displayName ?? "Someone"} sent a message`,
+      body: content,
+      actorId: socket.userId,
+      targetType: "chat",
+      targetId: socket.userId,
+    });
   }
 
   @SubscribeMessage("chat:group-send")
@@ -77,7 +86,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       .prepare("INSERT INTO group_messages (groupId, senderId, content, createdAt) VALUES (?, ?, ?, ?)")
       .run(groupId, socket.userId, content, new Date().toISOString());
     const row = this.sqlite.database.prepare("SELECT * FROM group_messages WHERE id = ?").get(Number(result.lastInsertRowid)) as any;
-    this.emitGroupMessage(this.shapeGroupMessage(row));
+    const message = this.shapeGroupMessage(row);
+    this.emitGroupMessage(message);
+    const members = this.sqlite.database.prepare("SELECT userId FROM chat_group_members WHERE groupId = ? AND userId <> ?").all(groupId, socket.userId) as any[];
+    for (const member of members) {
+      this.createNotification({
+        userId: Number(member.userId),
+        type: "message",
+        title: `${message.sender?.displayName ?? "Someone"} wrote in a group`,
+        body: content,
+        actorId: socket.userId,
+        targetType: "group",
+        targetId: groupId,
+      });
+    }
   }
 
   @SubscribeMessage("call:join")
@@ -119,6 +141,34 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     for (const member of group.members ?? []) {
       this.server.to(this.room(member.id)).emit("chat:group-updated", group);
     }
+  }
+
+  createNotification(input: {
+    userId: number;
+    type: string;
+    title: string;
+    body?: string;
+    actorId?: number | null;
+    targetType?: string | null;
+    targetId?: number | null;
+  }) {
+    if (input.actorId && input.actorId === input.userId) return null;
+    const result = this.sqlite.database
+      .prepare("INSERT INTO notifications (userId, type, title, body, actorId, targetType, targetId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(
+        input.userId,
+        input.type,
+        input.title.slice(0, 80),
+        (input.body ?? "").slice(0, 240),
+        input.actorId ?? null,
+        input.targetType ?? null,
+        input.targetId ?? null,
+        new Date().toISOString(),
+      );
+
+    const notification = this.notificationById(Number(result.lastInsertRowid));
+    this.server.to(this.room(input.userId)).emit("notification:new", notification);
+    return notification;
   }
 
   private broadcastPresence() {
@@ -198,6 +248,42 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       content: row.content,
       createdAt: row.createdAt,
       sender: this.auth.findUserById(Number(row.senderId)),
+    };
+  }
+
+  private notificationById(id: number) {
+    const row = this.sqlite.database
+      .prepare(
+        `SELECT n.*, u.username, u.displayName, u.avatarConfig, u.avatarImage, u.avatarLocked, u.bio, u.pageConfig, u.createdAt as actorCreatedAt
+         FROM notifications n
+         LEFT JOIN users u ON u.id = n.actorId
+         WHERE n.id = ?`,
+      )
+      .get(id) as any;
+
+    return {
+      id: Number(row.id),
+      userId: Number(row.userId),
+      type: row.type,
+      title: row.title,
+      body: row.body,
+      targetType: row.targetType,
+      targetId: row.targetId ? Number(row.targetId) : null,
+      readAt: row.readAt,
+      createdAt: row.createdAt,
+      actor: row.actorId
+        ? this.auth.publicUser({
+            id: row.actorId,
+            username: row.username,
+            displayName: row.displayName,
+            avatarConfig: row.avatarConfig,
+            avatarImage: row.avatarImage,
+            avatarLocked: row.avatarLocked,
+            bio: row.bio,
+            pageConfig: row.pageConfig,
+            createdAt: row.actorCreatedAt,
+          })
+        : null,
     };
   }
 }

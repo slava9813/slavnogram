@@ -2,10 +2,12 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Inject,
   NotFoundException,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -19,15 +21,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { JwtAuthGuard } from "./auth.guard";
 import { AuthService } from "./auth.service";
-import { apiRoot } from "./config";
+import { ChatGateway } from "./chat.gateway";
+import { uploadsRoot } from "./config";
 import { SqliteService } from "./sqlite.service";
-import { moderateContent, RequestWithUser } from "./types";
+import { extractHashtags, isAdminUsername, moderateContent, parseJson, RequestWithUser } from "./types";
 
-const uploadsDir = path.join(apiRoot(), "uploads");
+const uploadsDir = uploadsRoot();
 fs.mkdirSync(uploadsDir, { recursive: true });
 
 function filename(_req: unknown, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) {
-  const ext = path.extname(file.originalname).toLowerCase() || ".png";
+  const fallback = file.mimetype.startsWith("video/") ? ".mp4" : ".png";
+  const ext = path.extname(file.originalname).toLowerCase() || fallback;
   cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
 }
 
@@ -36,6 +40,7 @@ export class PostsController {
   constructor(
     @Inject(SqliteService) private readonly sqlite: SqliteService,
     @Inject(AuthService) private readonly auth: AuthService,
+    @Inject(ChatGateway) private readonly gateway: ChatGateway,
   ) {}
 
   @Get()
@@ -54,7 +59,7 @@ export class PostsController {
 
     const rows = this.sqlite.database
       .prepare(
-        `SELECT p.*, u.username, u.displayName, u.avatarConfig, u.avatarImage, u.avatarLocked, u.createdAt as authorCreatedAt, c.name as communityName
+        `SELECT p.*, u.username, u.displayName, u.avatarConfig, u.avatarImage, u.avatarLocked, u.bio, u.pageConfig, u.createdAt as authorCreatedAt, c.name as communityName
          FROM posts p
          JOIN users u ON u.id = p.authorId
          LEFT JOIN communities c ON c.id = p.communityId
@@ -63,7 +68,12 @@ export class PostsController {
       )
       .all(...values) as any[];
 
-    return rows.map((row) => this.hydratePost(row, viewer?.id));
+    const posts = rows.map((row) => this.hydratePost(row, viewer?.id));
+    if (!viewer?.id) return posts;
+    const settings = this.auth.findPrivateUserById(viewer.id)?.settings ?? {};
+    const topics = Array.isArray(settings.topics) ? settings.topics.map(String) : [];
+    if (!topics.length) return posts;
+    return posts.sort((a: any, b: any) => this.topicScore(b.tags, topics) - this.topicScore(a.tags, topics));
   }
 
   @Get("saved")
@@ -86,11 +96,11 @@ export class PostsController {
   @Post()
   @UseGuards(JwtAuthGuard)
   @UseInterceptors(
-    FileInterceptor("photo", {
+    FileInterceptor("media", {
       storage: diskStorage({ destination: uploadsDir, filename }),
-      limits: { fileSize: 8 * 1024 * 1024 },
+      limits: { fileSize: 48 * 1024 * 1024 },
       fileFilter: (_req, file, cb) => {
-        cb(null, /^image\/(png|jpe?g|webp|gif)$/i.test(file.mimetype));
+        cb(null, /^(image\/(png|jpe?g|webp|gif)|video\/(mp4|webm|quicktime))$/i.test(file.mimetype));
       },
     }),
   )
@@ -109,13 +119,16 @@ export class PostsController {
       if (!community) throw new NotFoundException("Community not found");
     }
 
+    const mediaType = file?.mimetype.startsWith("video/") ? "video" : file ? "image" : null;
+    const tags = extractHashtags(text);
+    const now = new Date().toISOString();
     const result = this.sqlite.database
-      .prepare("INSERT INTO posts (authorId, communityId, text, photoUrl, createdAt) VALUES (?, ?, ?, ?, ?)")
-      .run(req.user.id, communityId, text, file ? `/uploads/${file.filename}` : null, new Date().toISOString());
+      .prepare("INSERT INTO posts (authorId, communityId, text, photoUrl, mediaUrl, mediaType, tags, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(req.user.id, communityId, text, mediaType === "image" ? `/uploads/${file!.filename}` : null, file ? `/uploads/${file.filename}` : null, mediaType ?? "text", JSON.stringify(tags), now);
 
     const row = this.sqlite.database
       .prepare(
-        `SELECT p.*, u.username, u.displayName, u.avatarConfig, u.avatarImage, u.avatarLocked, u.createdAt as authorCreatedAt, c.name as communityName
+        `SELECT p.*, u.username, u.displayName, u.avatarConfig, u.avatarImage, u.avatarLocked, u.bio, u.pageConfig, u.createdAt as authorCreatedAt, c.name as communityName
          FROM posts p
          JOIN users u ON u.id = p.authorId
          LEFT JOIN communities c ON c.id = p.communityId
@@ -138,6 +151,16 @@ export class PostsController {
       this.sqlite.database.prepare("DELETE FROM post_likes WHERE postId = ? AND userId = ?").run(postId, req.user.id);
     } else {
       this.sqlite.database.prepare("INSERT INTO post_likes (postId, userId, createdAt) VALUES (?, ?, ?)").run(postId, req.user.id, new Date().toISOString());
+      const owner = this.sqlite.database.prepare("SELECT authorId FROM posts WHERE id = ?").get(postId) as any;
+      this.gateway.createNotification({
+        userId: Number(owner.authorId),
+        type: "like",
+        title: "New like",
+        body: "Someone liked your post",
+        actorId: req.user.id,
+        targetType: "post",
+        targetId: postId,
+      });
     }
 
     return { liked: !exists, likesCount: this.likeCount(postId) };
@@ -159,6 +182,37 @@ export class PostsController {
     return { saved: !exists };
   }
 
+  @Patch(":id")
+  @UseGuards(JwtAuthGuard)
+  update(@Req() req: RequestWithUser, @Param("id") id: string, @Body() body: { text?: string }) {
+    const postId = Number(id);
+    const post = this.sqlite.database.prepare("SELECT * FROM posts WHERE id = ?").get(postId) as any;
+    if (!post) throw new NotFoundException("Post not found");
+    if (!this.canManagePost(req.user.id, post)) throw new NotFoundException("Post not found");
+    const text = (body.text ?? "").trim();
+    if (!text && !post.mediaUrl && !post.photoUrl) throw new BadRequestException("Post needs text or media");
+    const moderationReason = moderateContent(text);
+    if (moderationReason) {
+      this.logModeration(req.user.id, "post", postId, moderationReason, text);
+      throw new BadRequestException(moderationReason);
+    }
+    this.sqlite.database
+      .prepare("UPDATE posts SET text = ?, tags = ?, updatedAt = ? WHERE id = ?")
+      .run(text, JSON.stringify(extractHashtags(text)), new Date().toISOString(), postId);
+    return this.postById(postId, req.user.id);
+  }
+
+  @Delete(":id")
+  @UseGuards(JwtAuthGuard)
+  remove(@Req() req: RequestWithUser, @Param("id") id: string) {
+    const postId = Number(id);
+    const post = this.sqlite.database.prepare("SELECT * FROM posts WHERE id = ?").get(postId) as any;
+    if (!post) throw new NotFoundException("Post not found");
+    if (!this.canManagePost(req.user.id, post)) throw new NotFoundException("Post not found");
+    this.sqlite.database.prepare("DELETE FROM posts WHERE id = ?").run(postId);
+    return { ok: true };
+  }
+
   @Post(":id/comments")
   @UseGuards(JwtAuthGuard)
   addComment(@Req() req: RequestWithUser, @Param("id") id: string, @Body() body: { text?: string }) {
@@ -177,6 +231,17 @@ export class PostsController {
       .prepare("INSERT INTO comments (postId, userId, text, createdAt) VALUES (?, ?, ?, ?)")
       .run(postId, req.user.id, text, new Date().toISOString());
 
+    const owner = this.sqlite.database.prepare("SELECT authorId FROM posts WHERE id = ?").get(postId) as any;
+    this.gateway.createNotification({
+      userId: Number(owner.authorId),
+      type: "comment",
+      title: "New comment",
+      body: text,
+      actorId: req.user.id,
+      targetType: "post",
+      targetId: postId,
+    });
+
     return this.commentById(Number(result.lastInsertRowid));
   }
 
@@ -185,6 +250,9 @@ export class PostsController {
       id: Number(row.id),
       text: row.text,
       photoUrl: row.photoUrl,
+      mediaUrl: row.mediaUrl ?? row.photoUrl,
+      mediaType: row.mediaType ?? (row.photoUrl ? "image" : "text"),
+      tags: parseJson<string[]>(row.tags, []),
       communityId: row.communityId ? Number(row.communityId) : null,
       communityName: row.communityName ?? null,
       createdAt: row.createdAt,
@@ -210,6 +278,29 @@ export class PostsController {
   private likeCount(postId: number) {
     const row = this.sqlite.database.prepare("SELECT COUNT(*) as count FROM post_likes WHERE postId = ?").get(postId) as any;
     return Number(row.count);
+  }
+
+  private postById(postId: number, viewerId?: number) {
+    const row = this.sqlite.database
+      .prepare(
+        `SELECT p.*, u.username, u.displayName, u.avatarConfig, u.avatarImage, u.avatarLocked, u.bio, u.pageConfig, u.createdAt as authorCreatedAt, c.name as communityName
+         FROM posts p
+         JOIN users u ON u.id = p.authorId
+         LEFT JOIN communities c ON c.id = p.communityId
+         WHERE p.id = ?`,
+      )
+      .get(postId) as any;
+    return this.hydratePost(row, viewerId);
+  }
+
+  private canManagePost(userId: number, post: any) {
+    if (Number(post.authorId) === userId) return true;
+    const user = this.sqlite.database.prepare("SELECT username, role FROM users WHERE id = ?").get(userId) as any;
+    return isAdminUsername(user?.username) || user?.role === "admin";
+  }
+
+  private topicScore(tags: string[], topics: string[]) {
+    return tags.filter((tag) => topics.includes(tag)).length;
   }
 
   private commentsForPost(postId: number) {

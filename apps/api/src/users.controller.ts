@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, NotFoundException, Param, Patch, Req, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, NotFoundException, Param, Patch, Post, Req, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "./auth.guard";
 import { AuthService } from "./auth.service";
 import { PresenceService } from "./presence.service";
@@ -25,11 +25,15 @@ export class UsersController {
   ) {}
 
   @Get()
-  list(@Req() req?: RequestWithUser) {
+  list(@Req() req?: any) {
+    const viewer = this.auth.optionalFromHeader(req?.headers?.authorization);
     const rows = this.sqlite.database.prepare("SELECT * FROM users ORDER BY displayName ASC").all() as any[];
     return rows
-      .map((row) => this.withPresence(row))
-      .filter((user) => user.id !== req?.user?.id);
+      .filter((row) => Number(row.id) !== viewer?.id)
+      .filter((row) => !row.blocked)
+      .filter((row) => !viewer || !this.blockExists(viewer.id, Number(row.id)))
+      .filter((row) => !viewer || !this.blockExists(Number(row.id), viewer.id))
+      .map((row) => ({ ...this.withPresence(row, viewer?.id), friendStatus: viewer ? this.friendStatus(viewer.id, Number(row.id)) : "none" }));
   }
 
   @Get("me")
@@ -71,6 +75,11 @@ export class UsersController {
       messageRequests: body.messageRequests === "friends" ? "friends" : "everyone",
       callQuality: body.callQuality === "high" ? "high" : "balanced",
       autoModeration: body.autoModeration === false ? false : true,
+      topics: Array.isArray(body.topics) ? body.topics.map((item) => String(item).toLowerCase()).filter(Boolean).slice(0, 24) : [],
+      notificationSound: body.notificationSound === false ? false : true,
+      ringSound: body.ringSound === false ? false : true,
+      notificationVolume: Math.max(0, Math.min(100, Number(body.notificationVolume ?? 70))),
+      ringVolume: Math.max(0, Math.min(100, Number(body.ringVolume ?? 80))),
     };
     this.sqlite.database.prepare("UPDATE users SET settings = ? WHERE id = ?").run(JSON.stringify(settings), req.user.id);
     return this.auth.findPrivateUserById(req.user.id);
@@ -92,17 +101,57 @@ export class UsersController {
     return { ok: true };
   }
 
-  @Get(":id")
-  get(@Param("id") id: string) {
-    const row = this.sqlite.database.prepare("SELECT * FROM users WHERE id = ?").get(Number(id)) as any;
-    if (!row) throw new NotFoundException("User not found");
-    return this.withPresence(row);
+  @Post(":id/block")
+  @UseGuards(JwtAuthGuard)
+  block(@Req() req: RequestWithUser, @Param("id") id: string) {
+    const otherId = Number(id);
+    if (!otherId || otherId === req.user.id) throw new BadRequestException("You cannot block yourself");
+    const other = this.sqlite.database.prepare("SELECT id FROM users WHERE id = ?").get(otherId);
+    if (!other) throw new NotFoundException("User not found");
+
+    const a = Math.min(req.user.id, otherId);
+    const b = Math.max(req.user.id, otherId);
+    this.sqlite.database.prepare("DELETE FROM friends WHERE userId = ? AND friendId = ?").run(a, b);
+    this.sqlite.database
+      .prepare("INSERT OR REPLACE INTO user_blocks (blockerId, blockedId, createdAt) VALUES (?, ?, ?)")
+      .run(req.user.id, otherId, new Date().toISOString());
+    return { ok: true };
   }
 
-  private withPresence(row: any) {
+  @Delete(":id/block")
+  @UseGuards(JwtAuthGuard)
+  unblock(@Req() req: RequestWithUser, @Param("id") id: string) {
+    this.sqlite.database.prepare("DELETE FROM user_blocks WHERE blockerId = ? AND blockedId = ?").run(req.user.id, Number(id));
+    return { ok: true };
+  }
+
+  @Get(":id")
+  get(@Param("id") id: string, @Req() req?: any) {
+    const viewer = this.auth.optionalFromHeader(req?.headers?.authorization);
+    const row = this.sqlite.database.prepare("SELECT * FROM users WHERE id = ?").get(Number(id)) as any;
+    if (!row) throw new NotFoundException("User not found");
+    return this.withPresence(row, viewer?.id);
+  }
+
+  private withPresence(row: any, viewerId?: number) {
     return {
       ...this.auth.publicUser(row),
       online: this.presence.isOnline(Number(row.id)),
+      blockedByMe: viewerId ? this.blockExists(viewerId, Number(row.id)) : false,
+      blockedMe: viewerId ? this.blockExists(Number(row.id), viewerId) : false,
     };
+  }
+
+  private friendStatus(userId: number, otherId: number) {
+    const a = Math.min(userId, otherId);
+    const b = Math.max(userId, otherId);
+    const row = this.sqlite.database.prepare("SELECT status, requesterId FROM friends WHERE userId = ? AND friendId = ?").get(a, b) as any;
+    if (!row) return "none";
+    if (row.status === "accepted") return "friend";
+    return Number(row.requesterId) === userId ? "outgoing" : "incoming";
+  }
+
+  private blockExists(blockerId: number, blockedId: number) {
+    return Boolean(this.sqlite.database.prepare("SELECT 1 FROM user_blocks WHERE blockerId = ? AND blockedId = ?").get(blockerId, blockedId));
   }
 }
