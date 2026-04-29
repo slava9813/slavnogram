@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.next/
+out/
+data/*.sqlite
+data/*.sqlite-*
+apps/api/uploads/*
+!apps/api/uploads/.gitkeep
+npm-debug.log*
+logs/
